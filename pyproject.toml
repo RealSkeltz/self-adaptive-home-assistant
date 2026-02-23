@@ -1,0 +1,26 @@
+[project]
+name = "home_assistant"
+version = "0.1.0"
+description = "Self-adaptive home assistant in a multi-agent set-up"
+authors = [
+    {name = "RealSkeltz"}
+]
+license = {text = "Private use"}
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "claude-agent-sdk (>=0.1.39,<0.2.0)",
+    "openai-whisper (>=20250625,<20250626)",
+    "webrtcvad (>=2.0.10,<3.0.0)",
+    "setuptools (>=82.0.0,<83.0.0)",
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "ipykernel (>=7.2.0,<8.0.0)"
+]
