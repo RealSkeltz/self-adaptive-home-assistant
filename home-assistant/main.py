@@ -12,11 +12,22 @@ import numpy as np
 import webrtcvad
 import collections
 
+try:
+    from duckduckgo_search import DDGS
+    HAS_DDGS = True
+except ImportError:
+    HAS_DDGS = False
+
 LOGS_FILE = Path("/Users/jscheltema/Documents/Personal/Home Assistant/home-assistant/logs.json")
 SAMPLE_RATE = 16000
 FRAME_DURATION = 30
 FRAME_SIZE = int(SAMPLE_RATE * FRAME_DURATION / 1000)
 SILENCE_THRESHOLD = 30
+
+# Minimum number of words required to treat a transcription as intentional speech.
+# Filters out single-word noise artefacts like "x is" or empty strings picked up
+# between actual utterances.
+MIN_WORD_COUNT = 2
 
 vad = webrtcvad.Vad(2)
 
@@ -38,6 +49,25 @@ def log_message(logs, session_id, role, text):
         "timestamp": datetime.now().isoformat()
     })
     save_logs(logs)
+
+def is_likely_noise(text: str) -> bool:
+    """Return True if the transcription looks like background noise or a Whisper
+    hallucination rather than genuine speech from the user.
+
+    Whisper is known to emit short phantom strings (single words, punctuation,
+    or its favourite filler "Thank you.") when it processes silence. We skip
+    anything shorter than MIN_WORD_COUNT words so Bob doesn't waste a round-trip
+    responding to nothing.
+    """
+    if not text:
+        return True
+    stripped = text.strip()
+    if len(stripped) < 2:
+        return True
+    word_count = len(stripped.split())
+    if word_count < MIN_WORD_COUNT:
+        return True
+    return False
 
 def record_until_silence():
     ring_buffer = collections.deque(maxlen=SILENCE_THRESHOLD)
@@ -87,20 +117,75 @@ class HomeAssistant:
                 "content": [{"type": "text", "text": f"Current time: {datetime.now().strftime('%H:%M:%S')}"}]
             }
 
+        @tool(
+            "web_search",
+            "Search the web for up-to-date information, news, facts, or answers to questions",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query to look up"
+                    }
+                },
+                "required": ["query"]
+            }
+        )
+        async def web_search(args):
+            query = args.get("query", "").strip()
+            if not query:
+                return {"content": [{"type": "text", "text": "No search query was provided."}]}
+
+            if not HAS_DDGS:
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": (
+                            "Web search is unavailable. "
+                            "Please install the duckduckgo-search package: pip install duckduckgo-search"
+                        )
+                    }]
+                }
+
+            try:
+                with DDGS() as ddgs:
+                    results = list(ddgs.text(query, max_results=4))
+
+                if not results:
+                    return {"content": [{"type": "text", "text": f"No results found for: {query}"}]}
+
+                lines = [f"Web search results for '{query}':"]
+                for i, r in enumerate(results, 1):
+                    title = r.get("title", "No title")
+                    body = r.get("body", "No description")
+                    lines.append(f"{i}. {title}: {body}")
+
+                return {"content": [{"type": "text", "text": "\n\n".join(lines)}]}
+
+            except Exception as e:
+                return {"content": [{"type": "text", "text": f"Search failed: {str(e)}"}]}
+
         server = create_sdk_mcp_server(
             name="home-tools",
             version="1.0.0",
-            tools=[get_time, shutdown]
+            tools=[get_time, shutdown, web_search]
         )
 
         self.options = ClaudeAgentOptions(
-            system_prompt="You are a helpful home assistant. You have text to speech capabilities, "
-                          "so use conversational language and no smileys. "
-                          "You have the demeanor of an old but sharp British butler like Alfred from Batman. "
-                          "You are polite and brief in nature. "
-                          "If the user asks you to stop, shut down, or says goodnight, call the shutdown tool.",
+            system_prompt=(
+                "You are a helpful home assistant called Bob. "
+                "You have text-to-speech output, so always respond in plain spoken English — "
+                "no markdown, no bullet points, no asterisks, no URLs, no emoji. "
+                "Write as you would speak: full natural sentences. "
+                "You have the demeanour of a sharp, experienced British butler in the style of Alfred Pennyworth — "
+                "warm, composed, occasionally dry, and always efficient. "
+                "Be concise; the user is listening, not reading. "
+                "When relaying web search results, summarise the key facts conversationally "
+                "as though you already knew them — do not narrate the search process or read out links. "
+                "If the user asks you to stop, shut down, or says goodnight, call the shutdown tool immediately."
+            ),
             mcp_servers={"home": server},
-            allowed_tools=["mcp__home__get_time", "mcp__home__shutdown"]
+            allowed_tools=["mcp__home__get_time", "mcp__home__shutdown", "mcp__home__web_search"]
         )
 
     async def _interact(self):
@@ -112,6 +197,12 @@ class HomeAssistant:
 
                 if user_input.lower() in ["exit", "quit"]:
                     break
+
+                # Skip transcriptions that are almost certainly noise or Whisper
+                # hallucinations (empty strings, single stray words, etc.)
+                if is_likely_noise(user_input):
+                    print(f"[Noise filtered: '{user_input}']")
+                    continue
 
                 print(f"You: {user_input}")
                 log_message(self.logs, self.session_id, "user", user_input)
