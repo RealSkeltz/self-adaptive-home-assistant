@@ -29,3 +29,6 @@ venv/
 *.key
 *.pem
 .env.*
+
+# Data
+*.json

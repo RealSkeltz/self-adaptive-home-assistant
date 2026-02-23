@@ -13,6 +13,7 @@ dependencies = [
     "openai-whisper (>=20250625,<20250626)",
     "webrtcvad (>=2.0.10,<3.0.0)",
     "setuptools (>=82.0.0,<83.0.0)",
+    "yapper-tts (>=0.7.2,<0.8.0)",
 ]
 
 
