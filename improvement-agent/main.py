@@ -1,8 +1,8 @@
 import asyncio
 import os
+import urllib.request
 from pathlib import Path
 import json
-from datetime import datetime
 
 from claude_agent_sdk import tool, create_sdk_mcp_server, ClaudeAgentOptions, ClaudeSDKClient, AssistantMessage, TextBlock
 
@@ -11,6 +11,7 @@ load_dotenv()
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 LOGS_FILE = Path("/Users/jscheltema/Documents/Personal/Home Assistant/home-assistant/logs.json")
 
@@ -64,18 +65,31 @@ class ImprovementAgent:
         @tool("make_request", "Make a request to the user in real life, for example asking them to perform an action or provide information", {"request": str})
         async def make_request(args):
             request_text = args["request"]
-            REQUESTS_FILE = Path("/Users/jscheltema/Documents/Personal/Home Assistant/improvement-agent/requests.json")
-            requests = json.loads(REQUESTS_FILE.read_text()) if REQUESTS_FILE.exists() else []
-            requests.append({
-                "request": request_text,
-                "timestamp": datetime.now().isoformat(),
-                "status": "pending"
-            })
-            REQUESTS_FILE.write_text(json.dumps(requests, indent=2))
 
-            return {
-                "content": [{"type": "text", "text": f"Request logged: {request_text}"}]
-            }
+            if not DISCORD_WEBHOOK_URL:
+                return {
+                    "content": [{"type": "text", "text": "Cannot send request: DISCORD_WEBHOOK_URL is not configured."}]
+                }
+
+            payload = json.dumps({
+                "content": f"**Bob improvement agent request:**\n{request_text}"
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                DISCORD_WEBHOOK_URL,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10):
+                    pass
+                return {
+                    "content": [{"type": "text", "text": f"Request sent to Discord: {request_text}"}]
+                }
+            except Exception as e:
+                return {
+                    "content": [{"type": "text", "text": f"Failed to send Discord message: {e}"}]
+                }
 
         server = create_sdk_mcp_server(
             name="home-tools",
