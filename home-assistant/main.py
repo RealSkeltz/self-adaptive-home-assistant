@@ -1,82 +1,73 @@
+import os
 import asyncio
+import json
+import uuid
+import subprocess
+from datetime import datetime
+from pathlib import Path
 from claude_agent_sdk import tool, create_sdk_mcp_server, ClaudeAgentOptions, ClaudeSDKClient, AssistantMessage, TextBlock
 import whisper
-import pyttsx3
-import time
-
-class HomeAssistant:
-    def __init__(self):
-        self.voice = pyttsx3.init(driverName='nsss')
-        self.ears = whisper.load_model("tiny")
-    
-        @tool("get_time", "Get the current time", {})
-        async def get_time(args):
-            from datetime import datetime
-            return {
-                "content": [{"type": "text", "text": f"Current time: {datetime.now().strftime('%H:%M:%S')}"}]
-            }
-
-        server = create_sdk_mcp_server(
-            name="home-tools",
-            version="1.0.0",
-            tools=[get_time]
-        )
-
-        self.options = ClaudeAgentOptions(
-            system_prompt="You are a helpful home assistant. You have text to speech capabilities, " \
-            "so use conversational language and no smileys."\
-            "You have the demeanor of an old but sharp British butler like Alfred from Batman.",
-            mcp_servers={"home": server},
-            allowed_tools=["mcp__home__get_time"]
-        )
-
-    async def _interact(self):
-        options = ClaudeAgentOptions(
-            system_prompt="You are a helpful home assistant. You have text to speech capabilities, so use conversational language and no smileys."\
-            "You have the demeanor of an old but sharp British butler like Alfred."
-            "You are polite and brief in nature."
-        )
-        async with ClaudeSDKClient(options=options) as client:
-            while True:
-                recording = record_until_silence()
-                result = self.ears.transcribe(recording, fp16=False)
-                user_input = result['text']
-
-                if user_input.lower() in ["exit", "quit"]:
-                    break
-
-                await client.query(prompt=user_input)
-
-                async for message in client.receive_response():
-                    if isinstance(message, AssistantMessage):
-                        for block in message.content:
-                            if isinstance(block, TextBlock):
-                                print(f"Assistant: {block.text}")
-                                self.voice.say(block.text)
-                                self.voice.runAndWait()
-                                while self.voice.isBusy():
-                                    time.sleep(0.1)
-
-    def comeAlive(self):
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._interact())
-        except RuntimeError:
-            asyncio.run(self._interact())
-
-
-# Helper functions
 import sounddevice as sd
 import numpy as np
 import webrtcvad
 import collections
 
-SAMPLE_RATE = 16000
-FRAME_DURATION = 30  # ms, webrtcvad supports 10, 20, or 30
-FRAME_SIZE = int(SAMPLE_RATE * FRAME_DURATION / 1000)
-SILENCE_THRESHOLD = 30  # number of silent frames before stopping
+try:
+    from duckduckgo_search import DDGS
+    HAS_DDGS = True
+except ImportError:
+    HAS_DDGS = False
 
-vad = webrtcvad.Vad(2)  # aggressiveness 0-3, higher = more aggressive filtering
+LOGS_FILE = Path("/Users/jscheltema/Documents/Personal/Home Assistant/home-assistant/logs.json")
+SAMPLE_RATE = 16000
+FRAME_DURATION = 30
+FRAME_SIZE = int(SAMPLE_RATE * FRAME_DURATION / 1000)
+SILENCE_THRESHOLD = 30
+
+# Minimum number of words required to treat a transcription as intentional speech.
+# Filters out single-word noise artefacts like "x is" or empty strings picked up
+# between actual utterances.
+MIN_WORD_COUNT = 2
+
+vad = webrtcvad.Vad(2)
+
+def speak(text):
+    subprocess.run(["say", "-v", "Daniel", text])
+
+def load_logs():
+    if LOGS_FILE.exists():
+        return json.loads(LOGS_FILE.read_text())
+    return {}
+
+def save_logs(logs):
+    LOGS_FILE.write_text(json.dumps(logs, indent=2))
+
+def log_message(logs, session_id, role, text):
+    logs[session_id]["messages"].append({
+        "role": role,
+        "text": text,
+        "timestamp": datetime.now().isoformat()
+    })
+    save_logs(logs)
+
+def is_likely_noise(text: str) -> bool:
+    """Return True if the transcription looks like background noise or a Whisper
+    hallucination rather than genuine speech from the user.
+
+    Whisper is known to emit short phantom strings (single words, punctuation,
+    or its favourite filler "Thank you.") when it processes silence. We skip
+    anything shorter than MIN_WORD_COUNT words so Bob doesn't waste a round-trip
+    responding to nothing.
+    """
+    if not text:
+        return True
+    stripped = text.strip()
+    if len(stripped) < 2:
+        return True
+    word_count = len(stripped.split())
+    if word_count < MIN_WORD_COUNT:
+        return True
+    return False
 
 def record_until_silence():
     ring_buffer = collections.deque(maxlen=SILENCE_THRESHOLD)
@@ -101,6 +92,145 @@ def record_until_silence():
                     break
 
     return np.concatenate(audio_buffer).squeeze().astype(np.float32) / 32768.0
+
+
+class HomeAssistant:
+    def __init__(self):
+        self.ears = whisper.load_model("tiny")
+        self.session_id = str(uuid.uuid4())
+        self.should_stop = False
+
+        self.logs = load_logs()
+        self.logs[self.session_id] = {"started_at": datetime.now().isoformat(), "messages": []}
+        save_logs(self.logs)
+
+        @tool("shutdown", "Shut down the home assistant", {})
+        async def shutdown(args):
+            self.should_stop = True
+            return {
+                "content": [{"type": "text", "text": "Shutting down."}]
+            }
+
+        @tool("get_time", "Get the current time", {})
+        async def get_time(args):
+            return {
+                "content": [{"type": "text", "text": f"Current time: {datetime.now().strftime('%H:%M:%S')}"}]
+            }
+
+        @tool(
+            "web_search",
+            "Search the web for up-to-date information, news, facts, or answers to questions",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query to look up"
+                    }
+                },
+                "required": ["query"]
+            }
+        )
+        async def web_search(args):
+            query = args.get("query", "").strip()
+            if not query:
+                return {"content": [{"type": "text", "text": "No search query was provided."}]}
+
+            if not HAS_DDGS:
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": (
+                            "Web search is unavailable. "
+                            "Please install the duckduckgo-search package: pip install duckduckgo-search"
+                        )
+                    }]
+                }
+
+            try:
+                with DDGS() as ddgs:
+                    results = list(ddgs.text(query, max_results=4))
+
+                if not results:
+                    return {"content": [{"type": "text", "text": f"No results found for: {query}"}]}
+
+                lines = [f"Web search results for '{query}':"]
+                for i, r in enumerate(results, 1):
+                    title = r.get("title", "No title")
+                    body = r.get("body", "No description")
+                    lines.append(f"{i}. {title}: {body}")
+
+                return {"content": [{"type": "text", "text": "\n\n".join(lines)}]}
+
+            except Exception as e:
+                return {"content": [{"type": "text", "text": f"Search failed: {str(e)}"}]}
+
+        server = create_sdk_mcp_server(
+            name="home-tools",
+            version="1.0.0",
+            tools=[get_time, shutdown, web_search]
+        )
+
+        self.options = ClaudeAgentOptions(
+            system_prompt=(
+                "You are a helpful home assistant called Bob. "
+                "You have text-to-speech output, so always respond in plain spoken English — "
+                "no markdown, no bullet points, no asterisks, no URLs, no emoji. "
+                "Write as you would speak: full natural sentences. "
+                "You have the demeanour of a sharp, experienced British butler in the style of Alfred Pennyworth — "
+                "warm, composed, occasionally dry, and always efficient. "
+                "Be concise; the user is listening, not reading. "
+                "When relaying web search results, summarise the key facts conversationally "
+                "as though you already knew them — do not narrate the search process or read out links. "
+                "If the user asks you to stop, shut down, or says goodnight, call the shutdown tool immediately."
+            ),
+            mcp_servers={"home": server},
+            allowed_tools=["mcp__home__get_time", "mcp__home__shutdown", "mcp__home__web_search"]
+        )
+
+    async def _interact(self):
+        async with ClaudeSDKClient(options=self.options) as client:
+            while True:
+                recording = record_until_silence()
+                result = self.ears.transcribe(recording, fp16=False)
+                user_input = result['text'].strip()
+
+                if user_input.lower() in ["exit", "quit"]:
+                    break
+
+                # Skip transcriptions that are almost certainly noise or Whisper
+                # hallucinations (empty strings, single stray words, etc.)
+                if is_likely_noise(user_input):
+                    print(f"[Noise filtered: '{user_input}']")
+                    continue
+
+                print(f"You: {user_input}")
+                log_message(self.logs, self.session_id, "user", user_input)
+
+                await client.query(prompt=user_input)
+
+                full_response = ""
+                async for message in client.receive_response():
+                    if isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if isinstance(block, TextBlock):
+                                full_response += block.text
+
+                if full_response:
+                    print(f"Assistant: {full_response}")
+                    log_message(self.logs, self.session_id, "assistant", full_response)
+                    speak(full_response)
+
+                if self.should_stop:
+                    break
+
+    def comeAlive(self):
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._interact())
+        except RuntimeError:
+            asyncio.run(self._interact())
+
 
 if __name__ == "__main__":
     bob = HomeAssistant()
