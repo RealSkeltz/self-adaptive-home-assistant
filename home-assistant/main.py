@@ -6,7 +6,9 @@ import subprocess
 import urllib.request
 import urllib.parse
 import re
-from datetime import datetime
+import threading
+import time as _time_module
+from datetime import datetime, timedelta
 from pathlib import Path
 from claude_agent_sdk import tool, create_sdk_mcp_server, ClaudeAgentOptions, ClaudeSDKClient, AssistantMessage, TextBlock
 import whisper
@@ -205,6 +207,138 @@ def _ddg_search(query: str, max_results: int = 5) -> list[str]:
         return []
 
 
+# ---------------------------------------------------------------------------
+# Reminder engine — parses natural language times and fires spoken alerts
+# ---------------------------------------------------------------------------
+
+def _parse_reminder_time(time_str: str) -> datetime | None:
+    """Parse a natural language time expression into a future datetime.
+
+    Handles:
+      - "in X minutes" / "in X hours"
+      - "at HH:MM" (24-hour, with optional am/pm)
+      - "at Ham/pm" or "at H am/pm"
+      - "at H" — picks the next upcoming hour on today's clock (am or pm)
+      - "at H o'clock" variants
+    """
+    now = datetime.now()
+    s = time_str.lower().strip()
+
+    # "in X minutes / hours"
+    m = re.match(r'in\s+(\d+)\s+(minute|minutes|min|mins|hour|hours|hr|hrs)', s)
+    if m:
+        amount = int(m.group(1))
+        unit = m.group(2)
+        delta = timedelta(hours=amount) if unit.startswith('h') else timedelta(minutes=amount)
+        return now + delta
+
+    # "at H:MM am/pm" or "at HH:MM am/pm" or "at HH:MM"
+    m = re.match(r'at\s+(\d{1,2}):(\d{2})\s*(am|pm)?', s)
+    if m:
+        hour = int(m.group(1))
+        minute = int(m.group(2))
+        meridiem = m.group(3)
+        if meridiem == 'pm' and hour != 12:
+            hour += 12
+        elif meridiem == 'am' and hour == 12:
+            hour = 0
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return target
+
+    # "at Ham/pm" or "at H am/pm"
+    m = re.match(r'at\s+(\d{1,2})\s*(am|pm)', s)
+    if m:
+        hour = int(m.group(1))
+        meridiem = m.group(2)
+        if meridiem == 'pm' and hour != 12:
+            hour += 12
+        elif meridiem == 'am' and hour == 12:
+            hour = 0
+        target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return target
+
+    # "at H" or "at H o'clock" — pick the next upcoming occurrence (am or pm)
+    m = re.match(r"at\s+(\d{1,2})(?:\s+o'?clock)?$", s)
+    if m:
+        hour = int(m.group(1))
+        candidates = []
+        for h in sorted({hour, (hour + 12) % 24}):
+            if 0 <= h <= 23:
+                t = now.replace(hour=h, minute=0, second=0, microsecond=0)
+                if t > now:
+                    candidates.append(t)
+        if candidates:
+            return min(candidates)
+        # All occurrences today are past — schedule for tomorrow
+        return now.replace(hour=hour % 24, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
+    return None
+
+
+class ReminderManager:
+    """Background thread that monitors pending reminders and speaks them aloud when due."""
+
+    def __init__(self, speak_fn):
+        self._speak = speak_fn
+        self._reminders: list[dict] = []
+        self._lock = threading.Lock()
+        self._next_id = 1
+        # Daemon thread dies automatically when the main process exits
+        self._thread = threading.Thread(target=self._monitor, daemon=True, name="ReminderMonitor")
+        self._thread.start()
+
+    def add(self, when: datetime, message: str) -> int:
+        with self._lock:
+            rid = self._next_id
+            self._next_id += 1
+            self._reminders.append({"id": rid, "when": when, "message": message})
+            return rid
+
+    def cancel(self, rid: int) -> bool:
+        with self._lock:
+            before = len(self._reminders)
+            self._reminders = [r for r in self._reminders if r["id"] != rid]
+            return len(self._reminders) < before
+
+    def list_pending(self) -> list[dict]:
+        with self._lock:
+            now = datetime.now()
+            return [
+                {
+                    "id": r["id"],
+                    "when": r["when"].strftime("%H:%M"),
+                    "message": r["message"],
+                }
+                for r in self._reminders
+                if r["when"] > now
+            ]
+
+    def _monitor(self):
+        while True:
+            _time_module.sleep(5)
+            now = datetime.now()
+            due = []
+            with self._lock:
+                remaining = []
+                for r in self._reminders:
+                    if r["when"] <= now:
+                        due.append(r)
+                    else:
+                        remaining.append(r)
+                self._reminders = remaining
+
+            for r in due:
+                try:
+                    print(f"[Reminder firing: {r['message']}]")
+                    self._speak(f"Reminder: {r['message']}")
+                except Exception as exc:
+                    print(f"[Reminder error: {exc}]")
+
+
 class HomeAssistant:
     def __init__(self):
         self.ears = whisper.load_model("tiny")
@@ -214,6 +348,9 @@ class HomeAssistant:
         self.logs = load_logs()
         self.logs[self.session_id] = {"started_at": datetime.now().isoformat(), "messages": []}
         save_logs(self.logs)
+
+        # Start the reminder engine before defining tools so the closure captures it
+        self.reminder_manager = ReminderManager(speak)
 
         @tool("shutdown", "Shut down the home assistant", {})
         async def shutdown(args):
@@ -435,10 +572,124 @@ end tell
                     }]
                 }
 
+        @tool(
+            "set_reminder",
+            "Set a spoken reminder that Bob will announce aloud at a future time — even mid-conversation",
+            {
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "What to remind the user about, e.g. 'clean the cat litter bin'"
+                    },
+                    "time": {
+                        "type": "string",
+                        "description": (
+                            "When to fire the reminder. Accepts natural language such as: "
+                            "'in 30 minutes', 'in 2 hours', 'at 7pm', 'at 19:00', 'at 7:30pm', 'at 7'"
+                        )
+                    }
+                },
+                "required": ["message", "time"]
+            }
+        )
+        async def set_reminder(args):
+            message = args.get("message", "").strip()
+            time_str = args.get("time", "").strip()
+
+            if not message:
+                return {"content": [{"type": "text", "text": "Please tell me what to remind you about."}]}
+            if not time_str:
+                return {"content": [{"type": "text", "text": "Please tell me when you'd like to be reminded."}]}
+
+            when = _parse_reminder_time(time_str)
+            if when is None:
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": (
+                            f"I'm afraid I couldn't parse the time '{time_str}'. "
+                            "Try something like 'in 30 minutes', 'at 7pm', or 'at 19:30'."
+                        )
+                    }]
+                }
+
+            rid = self.reminder_manager.add(when, message)
+            # Format the time naturally for spoken output
+            hour_24 = when.hour
+            hour_12 = hour_24 % 12 or 12
+            minute = when.strftime("%M")
+            ampm = "AM" if hour_24 < 12 else "PM"
+            time_display = (
+                f"{hour_12} {ampm}" if minute == "00"
+                else f"{hour_12}:{minute} {ampm}"
+            )
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"Reminder set. I'll remind you to {message} at {time_display}. "
+                        f"Reminder number {rid}."
+                    )
+                }]
+            }
+
+        @tool(
+            "list_reminders",
+            "List all pending reminders that have not yet fired",
+            {}
+        )
+        async def list_reminders(args):
+            pending = self.reminder_manager.list_pending()
+            if not pending:
+                return {"content": [{"type": "text", "text": "You have no pending reminders at the moment."}]}
+            parts = [f"reminder {r['id']} at {r['when']}: {r['message']}" for r in pending]
+            joined = "; ".join(parts)
+            count = len(pending)
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"You have {count} pending reminder{'s' if count != 1 else ''}: {joined}."
+                }]
+            }
+
+        @tool(
+            "cancel_reminder",
+            "Cancel a pending reminder by its ID number",
+            {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "integer",
+                        "description": "The reminder ID number to cancel"
+                    }
+                },
+                "required": ["id"]
+            }
+        )
+        async def cancel_reminder(args):
+            rid = args.get("id")
+            if rid is None:
+                return {"content": [{"type": "text", "text": "Please provide the reminder ID to cancel."}]}
+            cancelled = self.reminder_manager.cancel(int(rid))
+            if cancelled:
+                return {"content": [{"type": "text", "text": f"Reminder {rid} has been cancelled."}]}
+            else:
+                return {"content": [{"type": "text", "text": f"I couldn't find a pending reminder with that ID."}]}
+
         server = create_sdk_mcp_server(
             name="home-tools",
             version="2.0.0",
-            tools=[get_time, shutdown, web_search, get_weather, get_calendar_events]
+            tools=[
+                get_time,
+                shutdown,
+                web_search,
+                get_weather,
+                get_calendar_events,
+                set_reminder,
+                list_reminders,
+                cancel_reminder,
+            ]
         )
 
         self.options = ClaudeAgentOptions(
@@ -456,8 +707,15 @@ end tell
                 "'It is currently twelve degrees in London, partly cloudy, with a light breeze.' "
                 "When listing calendar events, read them out naturally and helpfully. "
                 "If the user asks what you can do, mention: telling the time, checking the weather, "
-                "searching the web for news or information, and checking today's calendar. "
-                "If the user asks you to stop, shut down, or says goodnight, call the shutdown tool immediately."
+                "searching the web for news or information, checking today's calendar, "
+                "and setting spoken reminders for any time they choose. "
+                "When the user asks to be reminded about something, ALWAYS use the set_reminder tool — "
+                "do not tell them you cannot do it. You CAN set reminders. "
+                "If the user says 'remind me at 7' without specifying am or pm, infer from context: "
+                "if it is currently evening, assume 7pm; if morning, assume 7am. "
+                "When a reminder fires, Bob will speak it aloud automatically — "
+                "so there is no need to tell the user to check their phone. "
+                "If the user asks to stop, shut down, or says goodnight, call the shutdown tool immediately."
             ),
             mcp_servers={"home": server},
             allowed_tools=[
@@ -466,6 +724,9 @@ end tell
                 "mcp__home__web_search",
                 "mcp__home__get_weather",
                 "mcp__home__get_calendar_events",
+                "mcp__home__set_reminder",
+                "mcp__home__list_reminders",
+                "mcp__home__cancel_reminder",
             ]
         )
 
