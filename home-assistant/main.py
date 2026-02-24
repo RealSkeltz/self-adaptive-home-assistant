@@ -751,17 +751,42 @@ end tell
 
                 await client.query(prompt=user_input)
 
-                full_response = ""
+                # Stream-speak: voice each text segment the moment it arrives rather
+                # than waiting for the entire response (including all tool calls) to
+                # complete before uttering a single word.
+                #
+                # This solves two problems the user flagged explicitly:
+                #
+                #   1. Dead-air latency — previously Bob stayed silent for the full
+                #      round-trip of every tool call before saying anything. Now the
+                #      user hears the opening words immediately.
+                #
+                #   2. Joined-sentence bug — when a response contained text on both
+                #      sides of a tool call, the old code concatenated them into one
+                #      string and fed that to `say`, making the two halves run
+                #      together without any natural pause. Now each text segment is
+                #      spoken as a self-contained utterance, so the tool-call
+                #      latency acts as a natural breath between sentences.
+                #
+                # `asyncio.to_thread` runs the blocking `say` subprocess in the
+                # thread-pool so the event loop stays live (important for the
+                # reminder daemon and any SDK heartbeats), while `await` on it
+                # ensures chunks play sequentially — chunk N+1 never starts until
+                # chunk N has finished speaking.
+                spoken_chunks: list[str] = []
                 async for message in client.receive_response():
                     if isinstance(message, AssistantMessage):
                         for block in message.content:
-                            if isinstance(block, TextBlock):
-                                full_response += block.text
+                            if isinstance(block, TextBlock) and block.text.strip():
+                                chunk = block.text
+                                spoken_chunks.append(chunk)
+                                print(f"Assistant: {chunk}")
+                                await asyncio.to_thread(speak, chunk)
 
-                if full_response:
-                    print(f"Assistant: {full_response}")
+                # Log the full response as a single entry for readability
+                if spoken_chunks:
+                    full_response = " ".join(spoken_chunks)
                     log_message(self.logs, self.session_id, "assistant", full_response)
-                    speak(full_response)
 
                 if self.should_stop:
                     break
