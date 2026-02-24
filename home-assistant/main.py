@@ -28,6 +28,15 @@ SILENCE_THRESHOLD = 30
 # between actual utterances.
 MIN_WORD_COUNT = 2
 
+# ---------------------------------------------------------------------------
+# Wake word configuration
+# ---------------------------------------------------------------------------
+# Bob wakes when his name appears in the transcribed audio.  Requiring "bob"
+# (rather than a generic "hey") keeps the false-positive rate very low while
+# still allowing natural greetings like "Hello Bob", "Hey Bob", "Good morning
+# Bob", or even just "Bob?".
+WAKE_WORD = "bob"
+
 vad = webrtcvad.Vad(2)
 
 # ---------------------------------------------------------------------------
@@ -344,6 +353,7 @@ class HomeAssistant:
         self.ears = whisper.load_model("tiny")
         self.session_id = str(uuid.uuid4())
         self.should_stop = False
+        self.go_dormant_flag = False  # Set by go_dormant tool to end conversation without full exit
 
         self.logs = load_logs()
         self.logs[self.session_id] = {"started_at": datetime.now().isoformat(), "messages": []}
@@ -352,11 +362,22 @@ class HomeAssistant:
         # Start the reminder engine before defining tools so the closure captures it
         self.reminder_manager = ReminderManager(speak)
 
-        @tool("shutdown", "Shut down the home assistant", {})
+        @tool("shutdown", "Completely shut down and exit the home assistant program", {})
         async def shutdown(args):
             self.should_stop = True
             return {
-                "content": [{"type": "text", "text": "Shutting down."}]
+                "content": [{"type": "text", "text": "Shutting down completely."}]
+            }
+
+        @tool(
+            "go_dormant",
+            "End the current conversation and return Bob to dormant/standby mode, waiting for the wake word 'Hey Bob' or 'Hello Bob'",
+            {}
+        )
+        async def go_dormant(args):
+            self.go_dormant_flag = True
+            return {
+                "content": [{"type": "text", "text": "Going into standby mode."}]
             }
 
         @tool("get_time", "Get the current time", {})
@@ -683,6 +704,7 @@ end tell
             tools=[
                 get_time,
                 shutdown,
+                go_dormant,
                 web_search,
                 get_weather,
                 get_calendar_events,
@@ -715,12 +737,20 @@ end tell
                 "if it is currently evening, assume 7pm; if morning, assume 7am. "
                 "When a reminder fires, Bob will speak it aloud automatically — "
                 "so there is no need to tell the user to check their phone. "
-                "If the user asks to stop, shut down, or says goodnight, call the shutdown tool immediately."
+                "IMPORTANT — ending a conversation: "
+                "When the user says goodbye, goodnight, see you later, that's all, cheers, or any "
+                "natural farewell at the end of a conversation, say a brief, warm farewell and then "
+                "IMMEDIATELY call the go_dormant tool. This puts Bob back into standby mode so he "
+                "can be woken again later with a wake word — it does NOT shut Bob down. "
+                "Only call the shutdown tool if the user explicitly says they want to turn Bob off "
+                "completely, shut down the program, or stop Bob entirely — not merely to end a chat. "
+                "Do NOT describe or announce that you are going dormant; simply say goodbye and call the tool."
             ),
             mcp_servers={"home": server},
             allowed_tools=[
                 "mcp__home__get_time",
                 "mcp__home__shutdown",
+                "mcp__home__go_dormant",
                 "mcp__home__web_search",
                 "mcp__home__get_weather",
                 "mcp__home__get_calendar_events",
@@ -730,66 +760,185 @@ end tell
             ]
         )
 
-    async def _interact(self):
-        async with ClaudeSDKClient(options=self.options) as client:
-            while True:
+    # ---------------------------------------------------------------------------
+    # Wake word helpers
+    # ---------------------------------------------------------------------------
+
+    @staticmethod
+    def _is_wake_word(text: str) -> bool:
+        """Return True if the transcribed text contains Bob's wake word.
+
+        We require the word 'bob' to appear as a whole word (not inside another
+        word like 'bobby') so we use a simple split-based check rather than regex,
+        which avoids any platform regex quirks.
+
+        Accepted examples: "Hello Bob", "Hey Bob", "Good morning Bob",
+        "Bob?", "Hi Bob how are you", "Okay Bob".
+        """
+        words = re.findall(r"[a-z]+", text.lower())
+        return WAKE_WORD in words
+
+    @staticmethod
+    def _strip_wake_word(text: str) -> str:
+        """Remove a leading greeting + wake-word prefix from the utterance.
+
+        For example: "Hello Bob, what is the time?" -> "what is the time?"
+        This lets us forward any command that was spoken in the same breath as
+        the wake word, rather than making the user repeat themselves.
+        """
+        # Remove optional greeting words followed by "bob" at the start
+        cleaned = re.sub(
+            r"^(?:(?:hey|hello|hi|okay|ok|good\s+(?:morning|afternoon|evening))\s+)?bob[,.\s!?]*",
+            "",
+            text.strip(),
+            flags=re.IGNORECASE,
+        ).strip()
+        return cleaned
+
+    @staticmethod
+    def _time_greeting() -> str:
+        """Return a time-appropriate greeting for when Bob wakes up."""
+        hour = datetime.now().hour
+        if hour < 12:
+            return "Good morning. How may I be of service?"
+        elif hour < 17:
+            return "Good afternoon. How may I be of service?"
+        else:
+            return "Good evening. How may I be of service?"
+
+    # ---------------------------------------------------------------------------
+    # Core interaction loop — dormant / active two-stage model
+    # ---------------------------------------------------------------------------
+
+    async def _wait_for_wake_word(self) -> tuple[bool, str]:
+        """Block in dormant mode until the wake word is detected.
+
+        Returns:
+            (woken: bool, remainder: str)
+            woken    — True if wake word heard, False if should_stop was set.
+            remainder — Any words spoken after "Bob" in the same utterance,
+                        which we can feed directly as the first user message.
+        """
+        print("\n" + "─" * 60)
+        print("  Bob is dormant.  Say 'Hey Bob' or 'Hello Bob' to begin.")
+        print("─" * 60 + "\n")
+
+        while not self.should_stop:
+            try:
                 recording = record_until_silence()
                 result = self.ears.transcribe(recording, fp16=False)
-                user_input = result['text'].strip()
+                user_input = result["text"].strip()
+
+                if is_likely_noise(user_input):
+                    print(f"[Dormant – noise filtered: '{user_input}']")
+                    continue
+
+                print(f"[Dormant heard: '{user_input}']")
+
+                if self._is_wake_word(user_input):
+                    remainder = self._strip_wake_word(user_input)
+                    return True, remainder
+
+            except Exception as exc:
+                print(f"[Wake-word listener error: {exc}]")
+
+        return False, ""
+
+    async def _run_conversation(self, client, initial_query: str = "") -> None:
+        """Run a single active conversation session.
+
+        Continues until the user says a farewell (go_dormant tool is called)
+        or asks for a full shutdown.
+
+        Args:
+            client        — An active ClaudeSDKClient to query.
+            initial_query — Optional first message already extracted from the
+                            wake-word utterance (e.g. "what is the time?" from
+                            "Hey Bob, what is the time?").
+        """
+        greeting = self._time_greeting()
+        print(f"[ACTIVE] Bob: {greeting}")
+        await asyncio.to_thread(speak, greeting)
+
+        # If the user packed a command into the same breath as the wake word,
+        # process it immediately so they don't have to repeat themselves.
+        pending_query: str | None = initial_query if initial_query else None
+
+        while not self.should_stop and not self.go_dormant_flag:
+            if pending_query:
+                user_input = pending_query
+                pending_query = None
+            else:
+                recording = record_until_silence()
+                result = self.ears.transcribe(recording, fp16=False)
+                user_input = result["text"].strip()
 
                 if user_input.lower() in ["exit", "quit"]:
+                    self.should_stop = True
                     break
 
-                # Skip transcriptions that are almost certainly noise or Whisper
-                # hallucinations (empty strings, single stray words, etc.)
                 if is_likely_noise(user_input):
                     print(f"[Noise filtered: '{user_input}']")
                     continue
 
-                print(f"You: {user_input}")
-                log_message(self.logs, self.session_id, "user", user_input)
+            print(f"You: {user_input}")
+            log_message(self.logs, self.session_id, "user", user_input)
 
-                await client.query(prompt=user_input)
+            await client.query(prompt=user_input)
 
-                # Stream-speak: voice each text segment the moment it arrives rather
-                # than waiting for the entire response (including all tool calls) to
-                # complete before uttering a single word.
-                #
-                # This solves two problems the user flagged explicitly:
-                #
-                #   1. Dead-air latency — previously Bob stayed silent for the full
-                #      round-trip of every tool call before saying anything. Now the
-                #      user hears the opening words immediately.
-                #
-                #   2. Joined-sentence bug — when a response contained text on both
-                #      sides of a tool call, the old code concatenated them into one
-                #      string and fed that to `say`, making the two halves run
-                #      together without any natural pause. Now each text segment is
-                #      spoken as a self-contained utterance, so the tool-call
-                #      latency acts as a natural breath between sentences.
-                #
-                # `asyncio.to_thread` runs the blocking `say` subprocess in the
-                # thread-pool so the event loop stays live (important for the
-                # reminder daemon and any SDK heartbeats), while `await` on it
-                # ensures chunks play sequentially — chunk N+1 never starts until
-                # chunk N has finished speaking.
-                spoken_chunks: list[str] = []
-                async for message in client.receive_response():
-                    if isinstance(message, AssistantMessage):
-                        for block in message.content:
-                            if isinstance(block, TextBlock) and block.text.strip():
-                                chunk = block.text
-                                spoken_chunks.append(chunk)
-                                print(f"Assistant: {chunk}")
-                                await asyncio.to_thread(speak, chunk)
+            # Stream-speak: voice each text segment as it arrives so the user
+            # hears a response immediately rather than waiting for all tool
+            # calls to complete first.
+            spoken_chunks: list[str] = []
+            async for message in client.receive_response():
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock) and block.text.strip():
+                            chunk = block.text
+                            spoken_chunks.append(chunk)
+                            print(f"Bob: {chunk}")
+                            await asyncio.to_thread(speak, chunk)
 
-                # Log the full response as a single entry for readability
-                if spoken_chunks:
-                    full_response = " ".join(spoken_chunks)
-                    log_message(self.logs, self.session_id, "assistant", full_response)
+            if spoken_chunks:
+                full_response = " ".join(spoken_chunks)
+                log_message(self.logs, self.session_id, "assistant", full_response)
 
-                if self.should_stop:
-                    break
+        # Reset the dormant flag after breaking out of the loop so the next
+        # activation starts cleanly.
+        self.go_dormant_flag = False
+
+    async def _interact(self):
+        """Top-level loop: alternates between dormant and active modes.
+
+        Dormant -> wait for wake word -> greet -> active conversation ->
+        farewell (go_dormant) -> dormant again.
+
+        A full shutdown exits the loop entirely.
+        """
+        while not self.should_stop:
+            # -- DORMANT MODE ----------------------------------------------------
+            woken, remainder = await self._wait_for_wake_word()
+            if not woken or self.should_stop:
+                break
+
+            # -- ACTIVE MODE -----------------------------------------------------
+            # Create a fresh session and SDK client for each conversation so
+            # the conversation history never bleeds across sessions.
+            self.session_id = str(uuid.uuid4())
+            self.logs[self.session_id] = {
+                "started_at": datetime.now().isoformat(),
+                "messages": [],
+            }
+            save_logs(self.logs)
+
+            async with ClaudeSDKClient(options=self.options) as client:
+                await self._run_conversation(client, initial_query=remainder)
+
+            if self.should_stop:
+                break
+            # Loop back to dormant mode
+
+        print("\n[Bob has shut down. Goodbye.]")
 
     def comeAlive(self):
         try:
