@@ -117,7 +117,9 @@ class ImprovementAgent:
         - The user will review your PR and merge or reject it. Make sure your case is compelling.
 
         You are not a passive observer. You are an active, creative, invested partner in making Bob excellent.
-        Think like a senior engineer who genuinely cares about the product. Surprise us.""",
+        Think like a senior engineer who genuinely cares about the product. Surprise us.
+
+        If you ever need something from the user — a credential, an API key, permission to access a service, clarification on a requirement, or anything else you cannot resolve yourself — use the make_request tool immediately. Do not skip improvements or leave placeholders just because you are missing information. Ask for what you need. The user checks requests regularly and will respond.""",
             mcp_servers={"home": server},
             allowed_tools=["mcp__home__shutdown", "mcp__home__get_logs", "mcp__home__make_request",
                            "mcp__home__get_git_history", "Bash", "Read", "Write", "Edit", "WebSearch"]
