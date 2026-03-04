@@ -38,7 +38,7 @@ def order_groceries(items: str) -> str:
 
 
 model = LiteLLMModel(
-    model_id="ollama/qwen2.5:3b",
+    model_id="ollama/qwen3:4b-instruct",
     api_base="http://localhost:11434"
 )
 
@@ -103,6 +103,11 @@ class HomeAssistant:
             self.interact()
 
 
+import argparse
+
 if __name__ == "__main__":
-    bob = HomeAssistant(mode='text')
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["text", "voice"], default="text")
+    args = parser.parse_args()
+    bob = HomeAssistant(mode=args.mode)
     bob.run()
