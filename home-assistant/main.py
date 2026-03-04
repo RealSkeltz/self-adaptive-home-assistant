@@ -39,7 +39,8 @@ def order_groceries(items: str) -> str:
 
 model = LiteLLMModel(
     model_id="ollama/qwen3:4b-instruct",
-    api_base="http://localhost:11434"
+    api_base="http://localhost:11434",
+    verbose=True
 )
 
 agent = ToolCallingAgent(tools=[check_calendar, order_groceries], model=model)
