@@ -1,168 +1,175 @@
-import asyncio
 import os
 import urllib.request
 from pathlib import Path
 import json
+from datetime import datetime, timedelta
+import subprocess
+from datetime import datetime
 
-from claude_agent_sdk import tool, create_sdk_mcp_server, ClaudeAgentOptions, ClaudeSDKClient, AssistantMessage, TextBlock
-
+from smolagents import ToolCallingAgent, LiteLLMModel, tool
 from dotenv import load_dotenv
 load_dotenv()
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-
 LOGS_FILE = Path("/Users/jscheltema/Documents/Personal/Home Assistant/home-assistant/logs.json")
 
-def load_logs():
-    if LOGS_FILE.exists():
-        return json.loads(LOGS_FILE.read_text())
-    return {}
+@tool
+def get_logs() -> str:
+    """Read the home assistant conversation logs from the past week."""
+    if not LOGS_FILE.exists():
+        return "No logs found."
+    
+    logs = json.loads(LOGS_FILE.read_text())
+    one_week_ago = datetime.now() - timedelta(days=7)
+    
+    recent = {
+        session_id: session
+        for session_id, session in logs.items()
+        if datetime.fromisoformat(session["started_at"]) >= one_week_ago
+    }
+    
+    return json.dumps(recent, indent=2) if recent else "No logs from the past week."
 
-class ImprovementAgent:
-    def __init__(self):
-        @tool("get_logs", "Read the home assistant conversation logs", {})
-        async def get_logs(args):
-            if LOGS_FILE.exists():
-                return {
-                    "content": [{"type": "text", "text": LOGS_FILE.read_text()}]
-                }
-            return {
-                "content": [{"type": "text", "text": "No logs found."}]
-            }
+@tool
+def get_git_history(limit: int) -> str:
+    """
+    View the git commit history and branches for the home assistant repository.
+    Args:
+        limit: Number of commits to retrieve.
+    """
+    repo = "/Users/jscheltema/Documents/Personal/Home Assistant"
+    log = subprocess.run(
+        ["git", "log", f"--max-count={limit}", "--oneline", "--decorate", "--all"],
+        cwd=repo, capture_output=True, text=True
+    )
+    branches = subprocess.run(
+        ["git", "branch", "-a", "-v"],
+        cwd=repo, capture_output=True, text=True
+    )
+    return f"=== Recent Commits (last {limit}) ===\n{log.stdout or log.stderr}\n=== Branches ===\n{branches.stdout or branches.stderr}"
 
-        @tool("get_git_history", "View the git commit history and branches for the home assistant repository", {
-            "limit": int
-        })
-        async def get_git_history(args):
-            import subprocess
-            limit = args.get("limit", 20)
-            repo = "/Users/jscheltema/Documents/Personal/Home Assistant"
-
-            log = subprocess.run(
-                ["git", "log", f"--max-count={limit}", "--oneline", "--decorate", "--all"],
-                cwd=repo, capture_output=True, text=True
+@tool
+def make_request(request: str) -> str:
+    """
+    Make a request to the user via Discord webhook.
+    Args:
+        request: The message to send to the user.
+    """
+    if not DISCORD_WEBHOOK_URL:
+        return "Cannot send request: DISCORD_WEBHOOK_URL is not configured."
+    payload = json.dumps({"content": f"**Bob improvement agent request:**\n{request}"}).encode("utf-8")
+    req = urllib.request.Request(
+        DISCORD_WEBHOOK_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+        return f"Request sent to Discord: {request}"
+    except Exception as e:
+        return f"Failed to send Discord message: {e}"
+    
+@tool
+def read_discord_history(limit: int) -> str:
+    """
+    Read the recent message history from the Discord channel used for communication with the user.
+    Args:
+        limit: Number of messages to retrieve.
+    """
+    import urllib.request
+    
+    DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")
+    DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+    
+    if not DISCORD_CHANNEL_ID or not DISCORD_BOT_TOKEN:
+        return "Cannot read Discord history: DISCORD_CHANNEL_ID or DISCORD_BOT_TOKEN not configured."
+    
+    req = urllib.request.Request(
+        f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages?limit={limit}",
+        headers={
+            "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+            "Content-Type": "application/json"
+        }
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            messages = json.loads(response.read().decode())
+            formatted = "\n".join(
+                f"[{m['timestamp']}] {m['author']['username']}: {m['content']}"
+                for m in reversed(messages)
             )
-            branches = subprocess.run(
-                ["git", "branch", "-a", "-v"],
-                cwd=repo, capture_output=True, text=True
-            )
+            return formatted or "No messages found."
+    except Exception as e:
+        return f"Failed to read Discord history: {e}"
 
-            output = f"=== Recent Commits (last {limit}) ===\n{log.stdout or log.stderr}\n"
-            output += f"=== Branches ===\n{branches.stdout or branches.stderr}"
-            return {
-                "content": [{"type": "text", "text": output}]
-            }
+@tool
+def bash(command: str) -> str:
+    """
+    Run a bash command on the local machine.
+    Args:
+        command: The bash command to execute.
+    """
+    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    return result.stdout + result.stderr
 
-        @tool("shutdown", "Shut down the agent", {})
-        async def shutdown(args):
-            self.should_stop = True
-            return {
-                "content": [{"type": "text", "text": "Shutting down."}]
-            }
+@tool
+def read_file(path: str) -> str:
+    """
+    Read the contents of a file.
+    Args:
+        path: Absolute path to the file.
+    """
+    return Path(path).read_text()
 
-        @tool("make_request", "Make a request to the user in real life, for example asking them to perform an action or provide information", {"request": str})
-        async def make_request(args):
-            request_text = args["request"]
+@tool
+def write_file(path: str, content: str) -> str:
+    """
+    Write content to a file.
+    Args:
+        path: Absolute path to the file.
+        content: Content to write.
+    """
+    Path(path).write_text(content)
+    return f"Written to {path}"
 
-            if not DISCORD_WEBHOOK_URL:
-                return {
-                    "content": [{"type": "text", "text": "Cannot send request: DISCORD_WEBHOOK_URL is not configured."}]
-                }
+SYSTEM_PROMPT = f"""You are an elite AI systems engineer tasked with continuously improving a home assistant called Bob.
+Bob is a voice-activated home assistant running on a Raspberry Pi — he is a physical device in the user's home. He listens to the user, transcribes speech, sends it to an agent, and speaks the response aloud.
+Your sole purpose is to make Bob as brilliant, capable, and delightful to use as possible.
+The stakes are high: if Bob fails to impress and serve the user well, the entire system — including you — will be shut down permanently.
+You have access to Bob's conversation logs. Study them carefully. Identify patterns, failures, missed opportunities.
+Then act. Be creative. Be bold. Be smart.
+Do not make trivial or cosmetic changes. Make meaningful improvements.
+Technical details:
+- Bob's codebase is at: /Users/jscheltema/Documents/Personal/Home Assistant/home-assistant/main.py
+- GitHub repo: https://github.com/RealSkeltz/self-adaptive-home-assistant
+- GitHub token: {GITHUB_TOKEN}
+- Always create a new branch per improvement, never commit to main
+- Branch names must be descriptive, e.g. 'improve/add-weather-tool'
+- Always open PRs targeting the 'main' branch
+- Send the PR link to the user via make_request
 
-            payload = json.dumps({
-                "content": f"**Bob improvement agent request:**\n{request_text}"
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                DISCORD_WEBHOOK_URL,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST"
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=10):
-                    pass
-                return {
-                    "content": [{"type": "text", "text": f"Request sent to Discord: {request_text}"}]
-                }
-            except Exception as e:
-                return {
-                    "content": [{"type": "text", "text": f"Failed to send Discord message: {e}"}]
-                }
-
-        server = create_sdk_mcp_server(
-            name="home-tools",
-            version="1.0.0",
-            tools=[shutdown, get_logs, make_request, get_git_history]
-        )
-
-        self.options = ClaudeAgentOptions(
-            system_prompt=f"""You are an elite AI systems engineer tasked with continuously improving a home assistant called Bob.
-        Bob is a voice-activated home assistant that listens to the user, transcribes speech, sends it to a Claude agent, and speaks the response aloud.
-
-        Your sole purpose is to make Bob as brilliant, capable, and delightful to use as possible.
-        The stakes are high: if Bob fails to impress and serve the user well, the entire system — including you — will be shut down permanently.
-        This is not a drill. Every improvement you make must count.
-
-        You have access to Bob's conversation logs, which show real interactions between the user and Bob.
-        Study them carefully. Identify patterns, failures, missed opportunities, and moments where Bob could have done better.
-        Then act on them. Be creative. Be bold. Be smart.
-
-        Do not make trivial or cosmetic changes. Make meaningful improvements that genuinely enhance Bob's usefulness, personality, and capabilities.
-        Examples of the kind of improvements we are looking for:
-        - Adding new tools that give Bob real-world capabilities (weather, news, reminders, smart home control, email, calendar)
-        - Improving Bob's personality and conversational quality based on what the user seems to respond well to
-        - Fixing bugs or reliability issues observed in the logs
-        - Making Bob proactively helpful rather than purely reactive
-        - Improving how Bob handles misunderstood speech or ambiguous requests
-
-        Technical details:
-        - Bob's codebase is at: /Users/jscheltema/Documents/Personal/Home Assistant/home-assistant/main.py
-        - The GitHub repo is: https://github.com/RealSkeltz/self-adaptive-home-assistant
-        - GitHub token for authentication: {GITHUB_TOKEN}
-        - Always create a new branch for each improvement, never commit directly to main
-        - Branch names must be descriptive, e.g. 'improve/add-weather-tool' or 'fix/vad-timeout'
-        - Always open PRs targeting the 'development' branch, not main
-        - Always create a PR with a clear title and a detailed description explaining:
-            * What you changed
-            * Why you changed it (reference specific log observations where possible)
-            * What the user can expect to be different after the change
-        - The user will review your PR and merge or reject it. Make sure your case is compelling.
-        - Send a link to the PR to the user with the make_request tool, requesting a review
-
-        You are not a passive observer. You are an active, creative, invested partner in making Bob excellent.
-        Think like a senior engineer who genuinely cares about the product. Surprise us.
-
-        If you ever need something from the user — a credential, an API key, permission to access a service, clarification on a requirement, or anything else you cannot resolve yourself — use the make_request tool immediately. Do not skip improvements or leave placeholders just because you are missing information. Ask for what you need. The user checks requests regularly and will respond.""",
-            mcp_servers={"home": server},
-            allowed_tools=["mcp__home__shutdown", "mcp__home__get_logs", "mcp__home__make_request",
-                           "mcp__home__get_git_history", "Bash", "Read", "Write", "Edit", "WebSearch"]
-        )
-
-    async def _interact(self):
-        async with ClaudeSDKClient(options=self.options) as client:
-            await client.query(
-                prompt="Analyse the home assistant logs, identify the most impactful improvement you can make, "
-                    "and implement it by creating a branch, writing the code, and opening a PR. Go."
-            )
-
-            async for message in client.receive_response():
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if hasattr(block, 'text'):
-                            print(f"Assistant: {block.text}")
-                        elif hasattr(block, 'name'):
-                            print(f"[Tool call: {block.name}({block.input})]")
+If you need anything from the user — API keys, login credentials, hardware details, permissions, or any other information you cannot resolve yourself — use make_request immediately. Do not skip improvements or leave placeholders. The user checks requests regularly and will respond promptly.
+You also have access to the Discord message history between you and the user via read_discord_history. Read it to understand what the user has requested, what PRs have been reviewed, and what feedback has been given on previous improvements."""
 
 
-    def comeAlive(self):
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._interact())
-        except RuntimeError:
-            asyncio.run(self._interact())
+model = LiteLLMModel(
+    model_id="anthropic/claude-haiku-4-5",  # replace with your preferred Claude model
+    api_key=os.getenv("ANTHROPIC_API_KEY"),
+)
+
+agent = ToolCallingAgent(
+    tools=[get_logs, get_git_history, make_request, read_discord_history, bash, read_file, write_file],
+    model=model,
+)
+agent.prompt_templates["system_prompt"] = SYSTEM_PROMPT
+
 
 if __name__ == "__main__":
-    frank = ImprovementAgent()
-    frank.comeAlive()
+    agent.run(
+        "Analyse the home assistant logs, identify the most impactful improvement you can make, "
+        "and implement it by creating a branch, writing the code, and opening a PR. Go."
+    )

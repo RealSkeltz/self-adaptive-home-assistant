@@ -9,13 +9,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import litellm
+litellm._turn_on_debug()
+
 SAMPLE_RATE = 16000
 FRAME_DURATION = 30
 FRAME_SIZE = int(SAMPLE_RATE * FRAME_DURATION / 1000)
 SILENCE_THRESHOLD = 30
 
 vad = webrtcvad.Vad(2)
-
 
 @tool
 def check_calendar(date: str) -> str:
@@ -27,23 +29,18 @@ def check_calendar(date: str) -> str:
     return "You have a dentist appointment at 10:00 AM and a team meeting at 3:00 PM."
 
 
-@tool
-def order_groceries(items: str) -> str:
-    """
-    Order groceries for delivery to the user's home.
-    Args:
-        items: A comma-separated list of items to order.
-    """
-    return f"Order placed! The following items will be delivered tomorrow between 2-4 PM: {items}."
-
-
 model = LiteLLMModel(
-    model_id="ollama/qwen3:4b-instruct",
+    model_id="ollama/qwen3:0.6b-instruct",
     api_base="http://localhost:11434",
     verbose=True
 )
 
-agent = ToolCallingAgent(tools=[check_calendar, order_groceries], model=model)
+agent = ToolCallingAgent(
+    tools=[check_calendar],
+    model=model,
+)
+
+agent.prompt_templates["system_prompt"] = "You are a smart home assistant that uses tools to assist the user." \
 
 
 def speak(text):
@@ -79,7 +76,6 @@ class HomeAssistant:
     def __init__(self, mode='text'):
         self.ears = whisper.load_model("tiny")
         self.mode = mode
-        self.tools = [check_calendar, order_groceries]
 
     def speak(self, text):
         speak(text)
@@ -93,7 +89,8 @@ class HomeAssistant:
             user_input = input("You: ")
 
         print(f"You: {user_input}")
-        response = agent.run(user_input, reset=False)
+        response = agent.run(user_input, reset=True)
+        print(agent.prompt_templates["system_prompt"])
         print(f"Bob: {response}")
 
         if self.mode == 'voice':
