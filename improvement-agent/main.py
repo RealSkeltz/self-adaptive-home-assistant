@@ -129,6 +129,7 @@ class ImprovementAgent:
             * Why you changed it (reference specific log observations where possible)
             * What the user can expect to be different after the change
         - The user will review your PR and merge or reject it. Make sure your case is compelling.
+        - Send a link to the PR to the user with the make_request tool, requesting a review
 
         You are not a passive observer. You are an active, creative, invested partner in making Bob excellent.
         Think like a senior engineer who genuinely cares about the product. Surprise us.
