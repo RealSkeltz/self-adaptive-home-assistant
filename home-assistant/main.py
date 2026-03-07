@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-#import litellm
-#litellm._turn_on_debug()
+import litellm
+litellm._turn_on_debug()
 
 SAMPLE_RATE = 16000
 FRAME_DURATION = 30
@@ -94,6 +94,12 @@ import argparse
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["text", "voice"], default="text")
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
+
+    if args.debug:
+        import litellm
+        litellm._turn_on_debug()
+
     bob = HomeAssistant(mode=args.mode)
     bob.run()
