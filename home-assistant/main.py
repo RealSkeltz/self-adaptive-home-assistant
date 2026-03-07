@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-import litellm
-litellm._turn_on_debug()
+#import litellm
+#litellm._turn_on_debug()
 
 SAMPLE_RATE = 16000
 FRAME_DURATION = 30
@@ -19,24 +19,13 @@ SILENCE_THRESHOLD = 30
 
 vad = webrtcvad.Vad(2)
 
-@tool
-def check_calendar(date: str) -> str:
-    """
-    Check the user's calendar for appointments on a given date.
-    Args:
-        date: The date to check in YYYY-MM-DD format.
-    """
-    return "You have a dentist appointment at 10:00 AM and a team meeting at 3:00 PM."
-
-
 model = LiteLLMModel(
-    model_id="ollama/qwen3:0.6b-instruct",
+    model_id="ollama/qwen3.5:0.8b",
     api_base="http://localhost:11434",
-    verbose=True
 )
 
 agent = ToolCallingAgent(
-    tools=[check_calendar],
+    tools=[],
     model=model,
 )
 
@@ -45,7 +34,6 @@ agent.prompt_templates["system_prompt"] = "You are a smart home assistant that u
 
 def speak(text):
     subprocess.run(["say", "-v", "Daniel", text])
-
 
 def record_until_silence():
     ring_buffer = collections.deque(maxlen=SILENCE_THRESHOLD)
