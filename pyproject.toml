@@ -16,6 +16,7 @@ dependencies = [
     "yapper-tts (>=0.7.2,<0.8.0)",
     "smolagents[litellm] (>=1.24.0,<2.0.0)",
     "timedelta (>=2020.12.3,<2021.0.0)",
+    "ollama (>=0.6.1,<0.7.0)",
 ]
 
 

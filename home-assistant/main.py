@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import litellm
-litellm._turn_on_debug()
+#litellm._turn_on_debug()
 
 SAMPLE_RATE = 16000
 FRAME_DURATION = 30
@@ -20,16 +20,38 @@ SILENCE_THRESHOLD = 30
 vad = webrtcvad.Vad(2)
 
 model = LiteLLMModel(
-    model_id="ollama/qwen3.5:0.8b",
+    #model_id="ollama/qwen3.5:0.8b",
+    #model_id="ollama/qwen3:4b-instruct",
+    model_id="ollama/qwen3.5:2b",
     api_base="http://localhost:11434",
 )
 
+import litellm
+original = litellm.completion
+
+def patched(*args, **kwargs):
+    result = original(*args, **kwargs)
+    msg = result.choices[0].message
+    print("🔍 RAW content:", msg.content)
+    print("🔍 RAW tool_calls:", msg.tool_calls)
+    return result
+
+litellm.completion = patched
+
+@tool
+def get_time() -> str:
+    """Get the current time."""
+    from datetime import datetime
+    return datetime.now().strftime("%H:%M")
+
 agent = ToolCallingAgent(
-    tools=[],
+    tools=[get_time],
     model=model,
+    max_steps=3
 )
 
-agent.prompt_templates["system_prompt"] = "You are a smart home assistant that uses tools to assist the user." \
+#agent.prompt_templates["system_prompt"] = "You are a smart home assistant that uses tools to assist the user." \
+#                                        "It is extremely important you correctly format your tool calls!" \
 
 
 def speak(text):
@@ -77,8 +99,18 @@ class HomeAssistant:
             user_input = input("You: ")
 
         print(f"You: {user_input}")
-        response = agent.run(user_input, reset=True)
-        print(agent.prompt_templates["system_prompt"])
+        try:
+            response = agent.run(user_input, reset=True)
+            for step in agent.memory.steps:
+                print('step')
+                if hasattr(step, 'token_usage') and step.token_usage:
+                    print("input:", step.token_usage.input_tokens)
+                    print("output:", step.token_usage.output_tokens)
+                if hasattr(step, 'model_output'):
+                    print("model_output:", repr(step.model_output))
+        except Exception as e:
+            print("Last model output:", agent.memory.get_full_steps())
+            response = "Sorry, I didn't understand that."
         print(f"Bob: {response}")
 
         if self.mode == 'voice':
