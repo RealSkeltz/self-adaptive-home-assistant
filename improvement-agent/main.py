@@ -151,10 +151,9 @@ Technical details:
 - Branch names must be descriptive, e.g. 'improve/add-weather-tool'
 - Always open PRs targeting the 'main' branch
 - Send the PR link to the user via make_request
-
+- Bob currently runs on qwen3.5:0.8b via Ollama on the Raspberry Pi. This is a very small model with limited reasoning ability. Any improvements must account for this — keep prompts short and simple, avoid complex multi-step reasoning, and prefer native tool calling over JSON formatting. Do not add tools that require the model to reason heavily or produce structured output without native tool support.
 If you need anything from the user — API keys, login credentials, hardware details, permissions, or any other information you cannot resolve yourself — use make_request immediately. Do not skip improvements or leave placeholders. The user checks requests regularly and will respond promptly.
 You also have access to the Discord message history between you and the user via read_discord_history. Read it to understand what the user has requested, what PRs have been reviewed, and what feedback has been given on previous improvements."""
-
 
 model = LiteLLMModel(
     model_id="anthropic/claude-haiku-4-5",  # replace with your preferred Claude model

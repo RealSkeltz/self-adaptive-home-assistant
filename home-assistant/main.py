@@ -21,7 +21,7 @@ def get_time() -> str:
     return datetime.now().strftime("%H:%M")
 
 conversation_history = [
-    {"role": "system", "content": "You are Bob, a smart home assistant running on a Raspberry Pi. Be concise and helpful."}
+    {"role": "system", "content": "You are Bob, an AI home assistant running on a Raspberry Pi. The person you are talking to is the user. You are Bob, they are the user. Never confuse yourself with the user. Be concise and helpful."}
 ]
 
 def final_answer(answer: str) -> str:
@@ -38,7 +38,7 @@ def run(user_input: str) -> str:
     
     while True:
         response = ollama.chat(
-            model="qwen3.5:2b",
+            model="qwen3.5:0.8b",
             messages=messages,
             tools=TOOLS,
             think=False,
