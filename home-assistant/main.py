@@ -1,7 +1,7 @@
 import whisper
 import sounddevice as sd
 import collections
-import webrtcvad
+#import webrtcvad
 import numpy as np
 import subprocess
 from datetime import datetime
@@ -13,7 +13,7 @@ SAMPLE_RATE = 16000
 FRAME_DURATION = 30
 FRAME_SIZE = int(SAMPLE_RATE * FRAME_DURATION / 1000)
 SILENCE_THRESHOLD = 30
-vad = webrtcvad.Vad(2)
+#vad = webrtcvad.Vad(2)
 
 # Tools
 def get_time() -> str:
