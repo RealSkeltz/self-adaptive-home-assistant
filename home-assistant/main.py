@@ -63,8 +63,13 @@ def run(user_input: str) -> str:
             conversation_history.append({"role": "assistant", "content": content})
             return content
 
+import platform
+
 def speak(text):
-    subprocess.run(["say", "-v", "Daniel", text])
+    if platform.system() == "Darwin":
+        subprocess.run(["say", "-v", "Daniel", text])
+    else:
+        subprocess.run(["espeak", text])
 
 def record_until_silence():
     ring_buffer = collections.deque(maxlen=SILENCE_THRESHOLD)
@@ -97,6 +102,7 @@ class HomeAssistant:
             recording = record_until_silence()
             result = self.ears.transcribe(recording, fp16=False)
             user_input = result["text"].strip()
+            print(f"You: {user_input}")
         elif self.mode == 'text':
             user_input = input("You: ")
         
