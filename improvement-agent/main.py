@@ -6,6 +6,9 @@ from datetime import datetime, timedelta
 import subprocess
 from datetime import datetime
 
+import discord
+import asyncio
+
 from smolagents import ToolCallingAgent, LiteLLMModel, tool
 from dotenv import load_dotenv
 load_dotenv()
@@ -56,59 +59,46 @@ def get_git_history(limit: int) -> str:
     )
     return f"=== Recent Commits (last {limit}) ===\n{log.stdout or log.stderr}\n=== Branches ===\n{branches.stdout or branches.stderr}"
 
+async def _fetch_discord_messages(channel_id: str, token: str, limit: int) -> str:
+    client = discord.Client(intents=discord.Intents.default())
+    async with client:
+        await client.login(token)
+        channel = await client.fetch_channel(int(channel_id))
+        messages = [m async for m in channel.history(limit=limit)]
+        return "\n".join(
+            f"[{m.created_at}] {m.author.name}: {m.content}"
+            for m in reversed(messages)
+        ) or "No messages found."
+
 @tool
 def make_request(request: str) -> str:
-    """
-    Make a request to the user via Discord webhook.
+    """Make a request to the user via Discord webhook.
     Args:
         request: The message to send to the user.
     """
     if not DISCORD_WEBHOOK_URL:
         return "Cannot send request: DISCORD_WEBHOOK_URL is not configured."
-    payload = json.dumps({"content": f"**Bob improvement agent request:**\n{request}"}).encode("utf-8")
-    req = urllib.request.Request(
-        DISCORD_WEBHOOK_URL,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST"
-    )
     try:
-        with urllib.request.urlopen(req, timeout=10):
-            pass
+        webhook = discord.SyncWebhook.from_url(DISCORD_WEBHOOK_URL)
+        webhook.send(f"**Bob improvement agent request:**\n{request}")
         return f"Request sent to Discord: {request}"
     except Exception as e:
         return f"Failed to send Discord message: {e}"
-    
+
 @tool
 def read_discord_history(limit: int) -> str:
-    """
-    Read the recent message history from the Discord channel used for communication with the user.
+    """Read the recent message history from the Discord channel.
     Args:
         limit: Number of messages to retrieve.
     """
-    import urllib.request
-    
-    DISCORD_CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID")
-    DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-    
-    if not DISCORD_CHANNEL_ID or not DISCORD_BOT_TOKEN:
+    channel_id = os.getenv("DISCORD_CHANNEL_ID")
+    token = os.getenv("DISCORD_BOT_TOKEN")
+    if not channel_id or not token:
         return "Cannot read Discord history: DISCORD_CHANNEL_ID or DISCORD_BOT_TOKEN not configured."
-    
-    req = urllib.request.Request(
-        f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL_ID}/messages?limit={limit}",
-        headers={
-            "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
-            "Content-Type": "application/json"
-        }
-    )
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            messages = json.loads(response.read().decode())
-            formatted = "\n".join(
-                f"[{m['timestamp']}] {m['author']['username']}: {m['content']}"
-                for m in reversed(messages)
-            )
-            return formatted or "No messages found."
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(_fetch_discord_messages(channel_id, token, limit))
     except Exception as e:
         return f"Failed to read Discord history: {e}"
 
