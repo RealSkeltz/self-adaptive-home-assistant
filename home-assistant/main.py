@@ -3,6 +3,8 @@ import sounddevice as sd
 import collections
 import webrtcvad
 import numpy as np
+import os
+from pathlib import Path
 import json
 import uuid
 import subprocess
@@ -14,17 +16,27 @@ load_dotenv()
 # Helper functions
 SESSION_ID = str(uuid.uuid4())
 
+if os.getenv("ENV") == "prd":
+    BASE_PATH = Path("/home/realskeltz/bob")
+else:
+    BASE_PATH = Path("/Users/jscheltema/Documents/Personal/Home Assistant")
+
+LOGS_FILE = BASE_PATH / "home-assistant/logs.json"
+
 def save_logs():
     try:
-        with open("logs.json", "r") as f:
+        with open(LOGS_FILE, "r") as f:
             data = json.load(f)
         if not isinstance(data, dict):
             data = {}
     except (FileNotFoundError, json.JSONDecodeError):
         data = {}
-    data[SESSION_ID] = conversation_history.copy()
-    with open("logs.json", "w") as f:
-        json.dump({"data": data}, f, indent=2)
+    data[SESSION_ID] = {
+        "started_at": datetime.now().isoformat(),
+        "messages": conversation_history.copy()
+    }
+    with open(LOGS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 SAMPLE_RATE = 16000
 FRAME_DURATION = 30
@@ -50,7 +62,6 @@ TOOL_MAP = {fn.__name__: fn for fn in TOOLS}
 
 def run(user_input: str) -> str:
     conversation_history.append({"role": "user", "content": user_input})
-    
     messages = conversation_history.copy()
     
     while True:
@@ -64,18 +75,20 @@ def run(user_input: str) -> str:
         
         if response.message.tool_calls:
             messages.append(response.message)
+            conversation_history.append(response.message)
             for tool_call in response.message.tool_calls:
                 print(f"🔧 Tool called: {tool_call.function.name}({tool_call.function.arguments})")
                 fn = TOOL_MAP.get(tool_call.function.name)
                 result = fn(**tool_call.function.arguments) if fn else "Tool not found"
                 print(f"🔧 Tool result: {result}")
-                messages.append({"role": "tool", "content": str(result)})
-                
-                if tool_call.function.name == "final_answer":
-                    conversation_history.append({"role": "assistant", "content": result})
-                    return result
+
+                if tool_call.function.name == "exit_conversation":
+                    return "__EXIT__"
+
+                tool_msg = {"role": "tool", "name": tool_call.function.name, "arguments": tool_call.function.arguments, "content": str(result)}
+                messages.append(tool_msg)
+                conversation_history.append(tool_msg)
         else:
-            # no tool call, plain response
             content = response.message.content
             conversation_history.append({"role": "assistant", "content": content})
             return content
@@ -88,7 +101,7 @@ def speak(text):
     else:
         subprocess.run(["espeak", text])
 
-def record_until_silence():
+def listen():
     ring_buffer = collections.deque(maxlen=SILENCE_THRESHOLD)
     audio_buffer = []
     started = False
@@ -116,7 +129,7 @@ class HomeAssistant:
 
     def interact(self):
         if self.mode == 'voice':
-            recording = record_until_silence()
+            recording = listen()
             result = self.ears.transcribe(recording, fp16=False)
             user_input = result["text"].strip()
             print(f"You: {user_input}")
