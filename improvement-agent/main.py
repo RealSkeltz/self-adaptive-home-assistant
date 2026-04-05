@@ -18,7 +18,7 @@ GITHUB_REPO = os.getenv("GITHUB_REPO")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 if os.getenv("ENV") == "prd":
-    BASE_PATH = Path("/home/realskeltz/self-adaptive-home-assistant")
+    BASE_PATH = Path("/home/realskeltz/bob")
 else:
     BASE_PATH = Path("/Users/jscheltema/Documents/Personal/Home Assistant")
 
@@ -59,17 +59,6 @@ def get_git_history(limit: int) -> str:
     )
     return f"=== Recent Commits (last {limit}) ===\n{log.stdout or log.stderr}\n=== Branches ===\n{branches.stdout or branches.stderr}"
 
-async def _fetch_discord_messages(channel_id: str, token: str, limit: int) -> str:
-    client = discord.Client(intents=discord.Intents.default())
-    async with client:
-        await client.login(token)
-        channel = await client.fetch_channel(int(channel_id))
-        messages = [m async for m in channel.history(limit=limit)]
-        return "\n".join(
-            f"[{m.created_at}] {m.author.name}: {m.content}"
-            for m in reversed(messages)
-        ) or "No messages found."
-
 @tool
 def make_request(request: str) -> str:
     """Make a request to the user via Discord webhook.
@@ -80,7 +69,7 @@ def make_request(request: str) -> str:
         return "Cannot send request: DISCORD_WEBHOOK_URL is not configured."
     try:
         webhook = discord.SyncWebhook.from_url(DISCORD_WEBHOOK_URL)
-        webhook.send(f"**Bob improvement agent request:**\n{request}")
+        webhook.send(request)
         return f"Request sent to Discord: {request}"
     except Exception as e:
         return f"Failed to send Discord message: {e}"
@@ -95,10 +84,23 @@ def read_discord_history(limit: int) -> str:
     token = os.getenv("DISCORD_BOT_TOKEN")
     if not channel_id or not token:
         return "Cannot read Discord history: DISCORD_CHANNEL_ID or DISCORD_BOT_TOKEN not configured."
+    
+    import urllib.request
+    req = urllib.request.Request(
+        f"https://discord.com/api/v10/channels/{channel_id}/messages?limit={limit}",
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "DiscordBot (https://github.com/RealSkeltz/self-adaptive-home-assistant, 1.0)"
+        }
+    )
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_fetch_discord_messages(channel_id, token, limit))
+        with urllib.request.urlopen(req, timeout=10) as response:
+            messages = json.loads(response.read().decode())
+            return "\n".join(
+                f"[{m['timestamp']}] {m['author']['username']}: {m['content']}"
+                for m in reversed(messages)
+            ) or "No messages found."
     except Exception as e:
         return f"Failed to read Discord history: {e}"
 
