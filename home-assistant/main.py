@@ -88,8 +88,10 @@ def run(user_input: str) -> str:
                 "content": response.message.content or "",
                 "tool_calls": [
                     {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
                     }
                     for tc in response.message.tool_calls
                 ]
@@ -106,18 +108,19 @@ def run(user_input: str) -> str:
                 if tool_call.function.name == "exit_conversation":
                     return "__EXIT__"
 
-                tool_msg = {
+                tool_msg = {"role": "tool", "content": str(result)}
+                messages.append(tool_msg)
+                conversation_history.append({
                     "role": "tool",
                     "name": tool_call.function.name,
                     "arguments": tool_call.function.arguments,
                     "content": str(result)
-                }
-                messages.append(tool_msg)
-                conversation_history.append(tool_msg)
+                })
         else:
             content = response.message.content
             conversation_history.append({"role": "assistant", "content": content})
             return content
+        
 import platform
 
 def speak(text):
