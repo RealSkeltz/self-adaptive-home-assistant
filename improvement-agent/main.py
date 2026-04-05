@@ -13,7 +13,13 @@ load_dotenv()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-LOGS_FILE = Path("/Users/jscheltema/Documents/Personal/Home Assistant/home-assistant/logs.json")
+
+if os.getenv("ENV") == "prd":
+    BASE_PATH = Path("/home/realskeltz/self-adaptive-home-assistant")
+else:
+    BASE_PATH = Path("/Users/jscheltema/Documents/Personal/Home Assistant")
+
+LOGS_FILE = BASE_PATH / "/logs.json"
 
 @tool
 def get_logs() -> str:
@@ -153,7 +159,8 @@ Technical details:
 - Send the PR link to the user via make_request
 - Bob currently runs on qwen3.5:0.8b via Ollama on the Raspberry Pi. This is a very small model with limited reasoning ability. Any improvements must account for this — keep prompts short and simple, avoid complex multi-step reasoning, and prefer native tool calling over JSON formatting. Do not add tools that require the model to reason heavily or produce structured output without native tool support.
 If you need anything from the user — API keys, login credentials, hardware details, permissions, or any other information you cannot resolve yourself — use make_request immediately. Do not skip improvements or leave placeholders. The user checks requests regularly and will respond promptly.
-You also have access to the Discord message history between you and the user via read_discord_history. Read it to understand what the user has requested, what PRs have been reviewed, and what feedback has been given on previous improvements."""
+You also have access to the Discord message history between you and the user via read_discord_history. Read it to understand what the user has requested, what PRs have been reviewed, and what feedback has been given on previous improvements.
+Do not spend more than 3 bash commands exploring before committing to an improvement."""
 
 model = LiteLLMModel(
     model_id="anthropic/claude-haiku-4-5",  # replace with your preferred Claude model
@@ -169,6 +176,9 @@ agent.prompt_templates["system_prompt"] = SYSTEM_PROMPT
 
 if __name__ == "__main__":
     agent.run(
-        "Analyse the home assistant logs, identify the most impactful improvement you can make, "
-        "and implement it by creating a branch, writing the code, and opening a PR. Go."
+        "1. Call get_logs to read conversation history. "
+        "2. Call read_discord_history with limit=20 to check user feedback. "
+        "3. Identify ONE impactful improvement. "
+        "4. Create a branch, implement it, open a PR, send the link via make_request. "
+        "5. Stop."
     )
