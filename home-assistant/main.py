@@ -83,8 +83,20 @@ def run(user_input: str) -> str:
         )
         
         if response.message.tool_calls:
-            messages.append(response.message)
-            conversation_history.append(response.message)
+            assistant_msg = {
+                "role": "assistant",
+                "content": response.message.content or "",
+                "tool_calls": [
+                    {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments
+                    }
+                    for tc in response.message.tool_calls
+                ]
+            }
+            messages.append(assistant_msg)
+            conversation_history.append(assistant_msg)
+
             for tool_call in response.message.tool_calls:
                 print(f"🔧 Tool called: {tool_call.function.name}({tool_call.function.arguments})")
                 fn = TOOL_MAP.get(tool_call.function.name)
@@ -94,14 +106,18 @@ def run(user_input: str) -> str:
                 if tool_call.function.name == "exit_conversation":
                     return "__EXIT__"
 
-                tool_msg = {"role": "tool", "name": tool_call.function.name, "arguments": tool_call.function.arguments, "content": str(result)}
+                tool_msg = {
+                    "role": "tool",
+                    "name": tool_call.function.name,
+                    "arguments": tool_call.function.arguments,
+                    "content": str(result)
+                }
                 messages.append(tool_msg)
                 conversation_history.append(tool_msg)
         else:
             content = response.message.content
             conversation_history.append({"role": "assistant", "content": content})
             return content
-
 import platform
 
 def speak(text):
