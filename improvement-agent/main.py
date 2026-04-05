@@ -22,7 +22,7 @@ if os.getenv("ENV") == "prd":
 else:
     BASE_PATH = Path("/Users/jscheltema/Documents/Personal/Home Assistant")
 
-LOGS_FILE = BASE_PATH / "/logs.json"
+LOGS_FILE = BASE_PATH / "home-assistant/logs.json"
 
 @tool
 def get_logs() -> str:
