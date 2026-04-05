@@ -49,15 +49,24 @@ def get_time() -> str:
     """Get the current time."""
     return datetime.now().strftime("%H:%M")
 
+def exit_conversation() -> str:
+    """Exit the conversation and say goodbye."""
+    return "__EXIT__"
+
+TOOLS = [get_time, exit_conversation]
+TOOL_MAP = {fn.__name__: fn for fn in TOOLS}
+
 conversation_history = [
-    {"role": "system", "content": "You are Bob, an AI home assistant running on a Raspberry Pi. The person you are talking to is the user. You are Bob, they are the user. Never confuse yourself with the user. Be concise and helpful."}
+    {"role": "system", "content": (
+        "You are Bob, a concise and helpful AI home assistant. "
+        "You have access to the following tools:\n"
+        "- get_time(): returns the current time\n"
+        "- exit_conversation(): call this when the user wants to end the conversation (e.g. bye, goodbye, quit, exit)\n"
+        "Always use tools when appropriate. Never simulate tool results in text."
+    )}
 ]
 
-def final_answer(answer: str) -> str:
-    """Provide the final answer to the user and end the conversation turn."""
-    return answer
-
-TOOLS = [get_time, final_answer]
+TOOLS = [get_time, exit_conversation]
 TOOL_MAP = {fn.__name__: fn for fn in TOOLS}
 
 def run(user_input: str) -> str:
@@ -141,7 +150,15 @@ class HomeAssistant:
         except Exception as e:
             print(f"Error: {e}")
             response = "Sorry, something went wrong."
-        
+
+        if response == "__EXIT__":
+            goodbye = "Goodbye!"
+            print(f"Bob: {goodbye}")
+            if self.mode == 'voice':
+                speak(goodbye)
+            save_logs()
+            raise SystemExit
+
         print(f"Bob: {response}")
         save_logs()
         if self.mode == 'voice':

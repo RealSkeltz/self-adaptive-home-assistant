@@ -142,7 +142,7 @@ You have access to Bob's conversation logs. Study them carefully. Identify patte
 Then act. Be creative. Be bold. Be smart.
 Do not make trivial or cosmetic changes. Make meaningful improvements.
 Technical details:
-- Bob's codebase is at: /Users/jscheltema/Documents/Personal/Home Assistant/home-assistant/main.py
+- Bob's codebase is at: /home/realskeltz/bob/home-assistant/main.py
 - GitHub repo: https://github.com/RealSkeltz/self-adaptive-home-assistant
 - GitHub token: {GITHUB_TOKEN}
 - Always create a new branch per improvement, never commit to main
