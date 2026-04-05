@@ -73,14 +73,22 @@ def run(user_input: str) -> str:
     conversation_history.append({"role": "user", "content": user_input})
     messages = conversation_history.copy()
     
-    while True:
-        response = ollama.chat(
-            model="qwen3.5:0.8b",
-            messages=messages,
-            tools=TOOLS,
-            think=False,
-            keep_alive=-1,
-        )
+    max_iterations = 5
+    iteration = 0
+    
+    while iteration < max_iterations:
+        iteration += 1
+        try:
+            response = ollama.chat(
+                model="qwen3.5:0.8b",
+                messages=messages,
+                tools=TOOLS,
+                think=False,
+                keep_alive=-1,
+            )
+        except Exception as e:
+            print(f"⚠️ Ollama error: {e}")
+            return "Sorry, I'm having trouble thinking right now."
         
         if response.message.tool_calls:
             assistant_msg = {
@@ -102,7 +110,13 @@ def run(user_input: str) -> str:
             for tool_call in response.message.tool_calls:
                 print(f"🔧 Tool called: {tool_call.function.name}({tool_call.function.arguments})")
                 fn = TOOL_MAP.get(tool_call.function.name)
-                result = fn(**tool_call.function.arguments) if fn else "Tool not found"
+                
+                try:
+                    result = fn(**tool_call.function.arguments) if fn else "Tool not found"
+                except Exception as e:
+                    print(f"⚠️ Tool error: {e}")
+                    result = f"Error calling tool: {str(e)}"
+                
                 print(f"🔧 Tool result: {result}")
 
                 if tool_call.function.name == "exit_conversation":
@@ -118,8 +132,17 @@ def run(user_input: str) -> str:
                 })
         else:
             content = response.message.content
-            conversation_history.append({"role": "assistant", "content": content})
-            return content
+            if content:
+                conversation_history.append({"role": "assistant", "content": content})
+                return content
+            else:
+                print("⚠️ Empty response from model, retrying...")
+                if iteration < max_iterations:
+                    continue
+                else:
+                    return "I'm not sure how to help with that."
+    
+    return "I need a moment to think about that."
         
 import platform
 
