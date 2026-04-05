@@ -3,11 +3,28 @@ import sounddevice as sd
 import collections
 import webrtcvad
 import numpy as np
+import json
+import uuid
 import subprocess
 from datetime import datetime
 from dotenv import load_dotenv
 import ollama
 load_dotenv()
+
+# Helper functions
+SESSION_ID = str(uuid.uuid4())
+
+def save_logs():
+    try:
+        with open("logs.json", "r") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = {}
+    data[SESSION_ID] = conversation_history.copy()
+    with open("logs.json", "w") as f:
+        json.dump({"data": data}, f, indent=2)
 
 SAMPLE_RATE = 16000
 FRAME_DURATION = 30
@@ -113,6 +130,7 @@ class HomeAssistant:
             response = "Sorry, something went wrong."
         
         print(f"Bob: {response}")
+        save_logs()
         if self.mode == 'voice':
             speak(response)
 
